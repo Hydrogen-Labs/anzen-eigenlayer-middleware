@@ -63,6 +63,26 @@ library AccumulatorLib {
         accumulator.prevTokensPerSecond = prevTokensPerSecond;
     }
 
+    function claim(
+        Accumulator storage accumulator,
+        uint256 performanceFeeBPS,
+        uint256 lastEpochUpdateTimestamp
+    ) external returns (uint256, uint256) {
+        _adjustClaimableTokens(
+            accumulator,
+            performanceFeeBPS,
+            lastEpochUpdateTimestamp
+        );
+
+        uint256 claimableTokens = accumulator.claimableTokens;
+        uint256 claimableFees = accumulator.claimableFees;
+
+        accumulator.claimableTokens = 0;
+        accumulator.claimableFees = 0;
+
+        return (claimableTokens, claimableFees);
+    }
+
     function _calculateClaimableTokensAndFee(
         Accumulator memory accumulator,
         uint256 performanceFeeBPS,
@@ -94,6 +114,5 @@ library AccumulatorLib {
 
         accumulator.claimableTokens += tokensGained;
         accumulator.claimableFees += fee;
-        lastEpochUpdateTimestamp = block.timestamp;
     }
 }

@@ -6,7 +6,6 @@ import "forge-std/console.sol";
 
 import "../../static/Structs.sol";
 import "../../AVSReservesManager.sol";
-
 // Mocks
 import "../mocks/MockSafetyFactorOracle.sol";
 
@@ -15,6 +14,7 @@ contract AVSReservesManagerTests is Test {
     MockSafetyFactorOracle public safetyFactorOracle;
     SafetyFactorConfig public safetyFactorConfig;
 
+    address public anzenGov;
     address public avsGov;
     address public avsId;
 
@@ -24,6 +24,7 @@ contract AVSReservesManagerTests is Test {
     function setUp() public {
         safetyFactorOracle = new MockSafetyFactorOracle();
 
+        anzenGov = address(0x555);
         avsGov = address(0x456);
         avsId = address(0x789);
 
@@ -47,6 +48,7 @@ contract AVSReservesManagerTests is Test {
             3 days
         );
 
+        vm.prank(anzenGov);
         reservesManager = new AVSReservesManager(
             safetyFactorConfig,
             address(safetyFactorOracle),
@@ -124,6 +126,8 @@ contract AVSReservesManagerTests is Test {
             assertEq(claimableTokens, timeElapsed * initialTokenFlows[i]);
             assertEq(safetyFactor, (int256(PRECISION) * 130) / 100);
         }
+
+        assertEq(reservesManager.lastEpochUpdateTimestamp(), timeElapsed + 1);
     }
 
     function test_rejectUpdateBeforeEpoch(uint256 timeElapsed) public {
@@ -161,5 +165,38 @@ contract AVSReservesManagerTests is Test {
         assertEq(updatedConfig.REDUCTION_FACTOR, newConfig.REDUCTION_FACTOR);
         assertEq(updatedConfig.INCREASE_FACTOR, newConfig.INCREASE_FACTOR);
         assertEq(updatedConfig.minEpochDuration, newConfig.minEpochDuration);
+    }
+
+    function test_rejectSafetyFactorConfigUpdateNotGov() public {
+        SafetyFactorConfig memory newConfig = SafetyFactorConfig(
+            (int256(PRECISION) * 110) / 100,
+            (int(PRECISION) * 150) / 100,
+            (PRECISION * 90) / 100,
+            (PRECISION * 110) / 10,
+            4 days
+        );
+
+        vm.expectRevert("Caller is not a AVS Gov");
+        vm.prank(address(0x123)); // not the AVS Gov
+        reservesManager.updateSafetyFactorParams(newConfig);
+    }
+
+    function test_adjustPerfomanceBPS(uint256 newFeeBps) public {
+        vm.assume(newFeeBps <= MAX_PERFORMANCE_FEE_BPS);
+
+        vm.prank(anzenGov);
+        reservesManager.adjustFeeBps(newFeeBps);
+
+        assertEq(reservesManager.performanceFeeBPS(), newFeeBps);
+    }
+
+    function rejects_adjustPerformanceBPSHigherThanMax(
+        uint256 newFeeBps
+    ) public {
+        vm.assume(newFeeBps > MAX_PERFORMANCE_FEE_BPS);
+
+        vm.expectRevert("Fee cannot be greater than 5%");
+        vm.prank(anzenGov);
+        reservesManager.adjustFeeBps(newFeeBps);
     }
 }
