@@ -6,6 +6,7 @@ import "forge-std/console.sol";
 
 import "../../static/Structs.sol";
 import "../../AVSReservesManager.sol";
+import "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
 // Mocks
 import "../mocks/MockSafetyFactorOracle.sol";
 
@@ -18,7 +19,7 @@ contract AVSReservesManagerTests is Test {
     address public avsGov;
     address public avsId;
 
-    address[] public rewardTokens;
+    address[] public avsRewardTokens;
     uint256[] public initialTokenFlows;
 
     function setUp() public {
@@ -32,9 +33,9 @@ contract AVSReservesManagerTests is Test {
         int256 safetyFactorInit = (int256(PRECISION) * 130) / 100;
         safetyFactorOracle.mockSetSafetyFactor(avsId, safetyFactorInit);
 
-        rewardTokens = new address[](2);
-        rewardTokens[0] = address(0xabc);
-        rewardTokens[1] = address(0xdef);
+        avsRewardTokens = new address[](2);
+        avsRewardTokens[0] = address(0xabc);
+        avsRewardTokens[1] = address(0xdef);
 
         initialTokenFlows = new uint256[](2);
         initialTokenFlows[0] = 100;
@@ -54,7 +55,7 @@ contract AVSReservesManagerTests is Test {
             address(safetyFactorOracle),
             avsGov,
             avsId,
-            rewardTokens,
+            avsRewardTokens,
             initialTokenFlows
         );
     }
@@ -83,14 +84,14 @@ contract AVSReservesManagerTests is Test {
         assertEq(reservesManager.lastEpochUpdateTimestamp(), 1);
 
         // Loop through each reward token and perform assertions
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+        for (uint256 i = 0; i < avsRewardTokens.length; i++) {
             (
                 uint256 claimableTokens,
                 uint256 claimableFees,
                 uint256 tokensPerSecond,
                 uint256 prevTokensPerSecond,
                 int256 lastSafetyFactor
-            ) = reservesManager.rewardTokenAccumulator(rewardTokens[i]);
+            ) = reservesManager.rewardTokenAccumulator(avsRewardTokens[i]);
 
             // Assert that the values match the expected initial token flows and default values
             assertEq(tokensPerSecond, initialTokenFlows[i]);
@@ -110,14 +111,14 @@ contract AVSReservesManagerTests is Test {
         reservesManager.updateFlow();
 
         // Loop through each reward token and perform assertions
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+        for (uint256 i = 0; i < avsRewardTokens.length; i++) {
             (
                 uint256 claimableTokens,
                 uint256 claimableFees,
                 uint256 tokensPerSecond,
                 uint256 prevTokensPerSecond,
                 int256 safetyFactor
-            ) = reservesManager.rewardTokenAccumulator(rewardTokens[i]);
+            ) = reservesManager.rewardTokenAccumulator(avsRewardTokens[i]);
 
             // Assert that the values match the expected initial token flows and default values
             assertEq(tokensPerSecond, initialTokenFlows[i]);
@@ -198,5 +199,124 @@ contract AVSReservesManagerTests is Test {
         vm.expectRevert("Fee cannot be greater than 5%");
         vm.prank(anzenGov);
         reservesManager.adjustFeeBps(newFeeBps);
+    }
+
+    function test_addRewardToken(
+        address newToken,
+        uint256 newTokenFlow
+    ) public {
+        vm.prank(avsGov);
+        IPaymentCoordinator.StrategyAndMultiplier[]
+            memory strategyAndMultiplier = new IPaymentCoordinator.StrategyAndMultiplier[](
+                0
+            );
+
+        reservesManager.addRewardToken(
+            newToken,
+            newTokenFlow,
+            strategyAndMultiplier
+        );
+
+        (
+            uint256 claimableTokens,
+            uint256 claimableFees,
+            uint256 tokensPerSecond,
+            uint256 prevTokensPerSecond,
+            int256 lastSafetyFactor
+        ) = reservesManager.rewardTokenAccumulator(newToken);
+
+        assertEq(tokensPerSecond, newTokenFlow);
+        assertEq(prevTokensPerSecond, newTokenFlow);
+        assertEq(claimableTokens, 0);
+        assertEq(claimableFees, 0);
+        assertEq(lastSafetyFactor, (int256(PRECISION) * 130) / 100);
+    }
+
+    function test_rejectAddRewardTokenNotGov(
+        address newToken,
+        uint256 newTokenFlow
+    ) public {
+        vm.expectRevert("Caller is not a AVS Gov");
+        vm.prank(address(0x123)); // not the AVS Gov
+        IPaymentCoordinator.StrategyAndMultiplier[]
+            memory strategyAndMultiplier = new IPaymentCoordinator.StrategyAndMultiplier[](
+                0
+            );
+
+        reservesManager.addRewardToken(
+            newToken,
+            newTokenFlow,
+            strategyAndMultiplier
+        );
+    }
+
+    function test_rejectsAddRewardTokenAlreadyExists() public {
+        vm.expectRevert("Reward token already exists");
+        vm.prank(avsGov);
+        IPaymentCoordinator.StrategyAndMultiplier[]
+            memory strategyAndMultiplier = new IPaymentCoordinator.StrategyAndMultiplier[](
+                0
+            );
+
+        reservesManager.addRewardToken(
+            avsRewardTokens[0],
+            123,
+            strategyAndMultiplier
+        );
+    }
+
+    function test_removeRewardToken() public {
+        address tokenToRemove = avsRewardTokens[0];
+        vm.prank(avsGov);
+        reservesManager.removeRewardToken(tokenToRemove);
+
+        address[] memory remainingTokens = reservesManager.getRewardTokens();
+
+        assertEq(remainingTokens.length, 1);
+        assertEq(remainingTokens[0], avsRewardTokens[1]);
+    }
+
+    function test_setStrategyAndMultiplier() public {
+        address token = avsRewardTokens[0];
+        uint256 numStrategies = 3;
+
+        // Create an array of StrategyAndMultiplier with three elements
+        IPaymentCoordinator.StrategyAndMultiplier[]
+            memory strategyAndMultiplier = new IPaymentCoordinator.StrategyAndMultiplier[](
+                numStrategies
+            );
+
+        // Initialize the strategies with different addresses and multipliers
+        for (uint256 i = 0; i < numStrategies; i++) {
+            strategyAndMultiplier[i] = IPaymentCoordinator
+                .StrategyAndMultiplier(
+                    IStrategy(address(uint160(0x111 + i))),
+                    uint96(i + 1)
+                );
+        }
+
+        // Set the strategies using a prank to simulate the governance address
+        vm.prank(avsGov);
+        reservesManager.setStrategyAndMultipliers(token, strategyAndMultiplier);
+
+        // Retrieve the strategies from the contract
+        IPaymentCoordinator.StrategyAndMultiplier[]
+            memory newStrategyAndMultiplier = reservesManager
+                .getStrategyAndMultipliers(token);
+
+        // Assert that the lengths match
+        assertEq(newStrategyAndMultiplier.length, numStrategies);
+
+        // Assert each strategy and multiplier in a loop
+        for (uint256 i = 0; i < numStrategies; i++) {
+            assertEq(
+                address(newStrategyAndMultiplier[i].strategy),
+                address(strategyAndMultiplier[i].strategy)
+            );
+            assertEq(
+                newStrategyAndMultiplier[i].multiplier,
+                strategyAndMultiplier[i].multiplier
+            );
+        }
     }
 }

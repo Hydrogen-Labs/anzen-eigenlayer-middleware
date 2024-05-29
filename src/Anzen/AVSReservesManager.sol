@@ -130,37 +130,8 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
 
     // Function to transfer tokenFlow to the Service Manager contract
     function makeRangePaymentsToServiceManager() public {
-        // Create a range payment for each reward token
         IPaymentCoordinator.RangePayment[]
-            memory rangePayments = new IPaymentCoordinator.RangePayment[](
-                rewardTokens.length
-            );
-
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            (
-                uint256 claimableTokens,
-                uint256 claimableFees
-            ) = rewardTokenAccumulator[rewardTokens[i]].claim(
-                    performanceFeeBPS,
-                    lastPaymentTimestamp
-                );
-            IERC20 rewardToken = IERC20(rewardTokens[i]);
-
-            _transferPerformanceFeeToAnzen(rewardTokens[i], claimableFees);
-
-            rangePayments[i] = _createRangePayment(
-                rewardToken,
-                claimableTokens
-            );
-        }
-
-        // Increase Allowance for the Service Manager contract
-        for (uint256 i = 0; i < rangePayments.length; i++) {
-            rangePayments[i].token.safeIncreaseAllowance(
-                address(avsServiceManager),
-                rangePayments[i].amount
-            );
-        }
+            memory rangePayments = _createAllRangePayments();
 
         // Transfer the tokens to the Service Manager contract
         avsServiceManager.payForRange(rangePayments);
@@ -201,6 +172,11 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
         IPaymentCoordinator.StrategyAndMultiplier[]
             memory _strategyAndMultipliers
     ) external onlyAvsGov {
+        require(
+            rewardTokenAccumulator[_rewardToken].tokensPerSecond == 0,
+            "Reward token already exists"
+        );
+
         rewardTokens.push(_rewardToken);
         rewardTokenAccumulator[_rewardToken].init(
             _initialTokenFlow,
@@ -270,6 +246,20 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
         return safetyFactorConfig;
     }
 
+    function getRewardTokens() external view returns (address[] memory) {
+        return rewardTokens;
+    }
+
+    function getStrategyAndMultipliers(
+        address _rewardToken
+    )
+        external
+        view
+        returns (IPaymentCoordinator.StrategyAndMultiplier[] memory)
+    {
+        return strategyAndMultipliers[_rewardToken];
+    }
+
     /**
      *
      *                            Internal Functions
@@ -310,12 +300,41 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
         }
     }
 
+    function _createAllRangePayments()
+        internal
+        returns (IPaymentCoordinator.RangePayment[] memory)
+    {
+        // Create a range payment for each reward token
+        IPaymentCoordinator.RangePayment[]
+            memory rangePayments = new IPaymentCoordinator.RangePayment[](
+                rewardTokens.length
+            );
+
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            (
+                uint256 claimableTokens,
+                uint256 claimableFees
+            ) = rewardTokenAccumulator[rewardTokens[i]].claim(
+                    performanceFeeBPS,
+                    lastPaymentTimestamp
+                );
+            IERC20 rewardToken = IERC20(rewardTokens[i]);
+
+            _transferPerformanceFeeToAnzen(rewardTokens[i], claimableFees);
+
+            rangePayments[i] = _createRangePayment(
+                rewardToken,
+                claimableTokens
+            );
+        }
+
+        return rangePayments;
+    }
+
     function _createRangePayment(
         IERC20 _rewardToken,
         uint256 _claimableTokens
     ) internal view returns (IPaymentCoordinator.RangePayment memory) {
-        // Create a range payment for the reward token
-
         // Get the claimable tokens for the reward token
         uint256 maxClaimableTokens = Math.max(
             _claimableTokens,
