@@ -9,6 +9,8 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import {IPaymentCoordinator} from "eigenlayer-contracts/src/contracts/interfaces/IPaymentCoordinator.sol";
 
 import {IAVSReservesManager} from "./interfaces/IAVSReservesManager.sol";
+import {AVSReservesManagerStorage} from "./AVSReservesManagerStorage.sol";
+
 import {ISafetyFactorOracle} from "./interfaces/ISafetyFactorOracle.sol";
 import {IServiceManager} from "../interfaces/IServiceManager.sol";
 
@@ -23,41 +25,22 @@ import "forge-std/console.sol";
 
 // The reserves manager serves as a 'battery' for the Service Manager contract:
 // Storing excess tokens when the protocol is healthy and releasing them when the protocol is in need of more security
-contract AVSReservesManager is IAVSReservesManager, AccessControl {
+contract AVSReservesManager is AVSReservesManagerStorage, AccessControl {
     using SafeERC20 for IERC20;
     using AccumulatorLib for Accumulator;
 
-    // State variables
-    SafetyFactorConfig public safetyFactorConfig; // Safety Factor configuration
-    uint256 public performanceFeeBPS = 300; // Performance-based fee
-    address[] public rewardTokens; // List of reward tokens
-    mapping(address => Accumulator) public rewardTokenAccumulator; // mapping of reward tokens to Safety Factor Updaters
-    mapping(address => IPaymentCoordinator.StrategyAndMultiplier[])
-        public strategyAndMultipliers; // mapping of reward tokens to payments (for future use
-    // public rewardTokenPayments; // mapping of reward tokens to payments (for future use
-
-    uint32 public lastPaymentTimestamp; // Timestamp of the last payment
-    uint256 public lastEpochUpdateTimestamp;
-    address public protocol; // Address of the protocol in Anzen
-    address public anzen; // Address of the Anzen contract
-
-    IServiceManager public avsServiceManager; // Address of the Service Manager contract
-    ISafetyFactorOracle public safetyFactorOracle; // Address of the Safety Factor Oracle contract
+    /**
+     *
+     *                            Immutables
+     *
+     */
+    IServiceManager public immutable avsServiceManager; // Address of the Service Manager contract
 
     /**
      *
      *                            Modifiers
      *
      */
-
-    modifier afterEpochExpired() {
-        require(
-            block.timestamp >=
-                lastEpochUpdateTimestamp + safetyFactorConfig.minEpochDuration,
-            "Epoch not yet expired"
-        );
-        _;
-    }
 
     modifier onlyAvsGov() {
         require(hasRole(AVS_GOV_ROLE, msg.sender), "Caller is not a AVS Gov");
@@ -72,21 +55,43 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
         _;
     }
 
-    // Initialize contract with initial values
+    modifier afterEpochExpired() {
+        require(
+            block.timestamp >=
+                lastEpochUpdateTimestamp + safetyFactorConfig.minEpochDuration,
+            "Epoch not yet expired"
+        );
+        _;
+    }
+
     constructor(
         SafetyFactorConfig memory _safetyFactorConfig,
+        uint256 _performanceFeeBPS,
         address _safetyFactorOracle,
         address _avsGov,
         address _protocolId,
+        address _avsServiceManager,
         address[] memory _rewardTokens,
         uint256[] memory _initial_tokenFlowsPerSecond
     ) {
         _validateSafetyFactorConfig(_safetyFactorConfig);
+        _validatePerformanceFee(_performanceFeeBPS);
         // require that the number of reward tokens is equal to the number of initial token flows
         require(
             _rewardTokens.length == _initial_tokenFlowsPerSecond.length,
             "Invalid number of reward tokens"
         );
+
+        // require token flows are greater than 0
+        for (
+            uint256 index = 0;
+            index < _initial_tokenFlowsPerSecond.length;
+            index++
+        ) {
+            _validateInitialTokensPerSecond(
+                _initial_tokenFlowsPerSecond[index]
+            );
+        }
 
         safetyFactorConfig = _safetyFactorConfig;
 
@@ -94,16 +99,24 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
 
         protocol = _protocolId;
         rewardTokens = _rewardTokens;
+        performanceFeeBPS = _performanceFeeBPS;
 
         // initialize token flow for each reward token
-        for (uint256 i = 0; i < _rewardTokens.length; i++) {
-            rewardTokenAccumulator[_rewardTokens[i]].init(
-                _initial_tokenFlowsPerSecond[i],
+        for (
+            uint256 rewardTokenIndex = 0;
+            rewardTokenIndex < _rewardTokens.length;
+            rewardTokenIndex++
+        ) {
+            rewardTokenAccumulator[_rewardTokens[rewardTokenIndex]].init(
+                _initial_tokenFlowsPerSecond[rewardTokenIndex],
                 safetyFactorOracle.getSafetyFactor(protocol)
             );
         }
 
         lastEpochUpdateTimestamp = block.timestamp;
+        lastPaymentTimestamp = uint32(block.timestamp);
+
+        avsServiceManager = IServiceManager(_avsServiceManager);
 
         _grantRole(AVS_GOV_ROLE, _avsGov);
         _grantRole(ANZEN_GOV_ROLE, msg.sender);
@@ -116,8 +129,8 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
             protocol
         );
 
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            rewardTokenAccumulator[rewardTokens[i]].adjustEpochFlow(
+        for (uint256 index = 0; index < rewardTokens.length; index++) {
+            rewardTokenAccumulator[rewardTokens[index]].adjustEpochFlow(
                 safetyFactorConfig,
                 currentSafetyFactor,
                 performanceFeeBPS,
@@ -157,13 +170,23 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
         );
 
         // This function is only callable by the AVS delegated address and should only be used in emergency situations
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            rewardTokenAccumulator[rewardTokens[i]].overrideTokensPerSecond(
-                _newTokensPerSecond[i],
-                lastEpochUpdateTimestamp
-            );
+        for (uint256 index = 0; index < rewardTokens.length; index++) {
+            rewardTokenAccumulator[rewardTokens[index]].overrideTokensPerSecond(
+                    _newTokensPerSecond[index],
+                    lastEpochUpdateTimestamp
+                );
         }
         lastEpochUpdateTimestamp = block.timestamp;
+    }
+
+    function overrideClaimableTokens(
+        address _rewardToken,
+        uint256 _claimableTokens
+    ) external onlyAvsGov {
+        // This function is only callable by the AVS delegated address and should only be used in emergency situations
+        rewardTokenAccumulator[_rewardToken].overrideClaimableTokens(
+            _claimableTokens
+        );
     }
 
     function addRewardToken(
@@ -176,6 +199,7 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
             rewardTokenAccumulator[_rewardToken].tokensPerSecond == 0,
             "Reward token already exists"
         );
+        _validateInitialTokensPerSecond(_initialTokenFlow);
 
         rewardTokens.push(_rewardToken);
         rewardTokenAccumulator[_rewardToken].init(
@@ -189,9 +213,9 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
         delete rewardTokenAccumulator[_rewardToken];
         delete strategyAndMultipliers[_rewardToken];
 
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
-            if (rewardTokens[i] == _rewardToken) {
-                rewardTokens[i] = rewardTokens[rewardTokens.length - 1];
+        for (uint256 index = 0; index < rewardTokens.length; index++) {
+            if (rewardTokens[index] == _rewardToken) {
+                rewardTokens[index] = rewardTokens[rewardTokens.length - 1];
                 rewardTokens.pop();
                 break;
             }
@@ -214,10 +238,6 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
         _setStrategyAndMultipliers(_rewardToken, _strategyAndMultipliers);
     }
 
-    function setServiceManager(address _paymentMaster) external onlyAvsGov {
-        avsServiceManager = IServiceManager(_paymentMaster);
-    }
-
     /**
      *
      *                            Anzen Governance Functions
@@ -225,39 +245,8 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
      */
 
     function adjustFeeBps(uint256 _newFeeBps) external onlyAnzenGov {
-        require(
-            _newFeeBps <= MAX_PERFORMANCE_FEE_BPS,
-            "Fee cannot be greater than 5%"
-        );
+        _validatePerformanceFee(_newFeeBps);
         performanceFeeBPS = _newFeeBps;
-    }
-
-    /**
-     *
-     *                            View Functions
-     *
-     */
-
-    function getSafetyFactorConfig()
-        external
-        view
-        returns (SafetyFactorConfig memory)
-    {
-        return safetyFactorConfig;
-    }
-
-    function getRewardTokens() external view returns (address[] memory) {
-        return rewardTokens;
-    }
-
-    function getStrategyAndMultipliers(
-        address _rewardToken
-    )
-        external
-        view
-        returns (IPaymentCoordinator.StrategyAndMultiplier[] memory)
-    {
-        return strategyAndMultipliers[_rewardToken];
     }
 
     /**
@@ -284,6 +273,19 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
         require(PRECISION < _config.INCREASE_FACTOR, "Invalid Increase Factor");
     }
 
+    function _validatePerformanceFee(uint256 _fee) internal pure {
+        require(
+            _fee <= MAX_PERFORMANCE_FEE_BPS,
+            "Fee cannot be greater than 5%"
+        );
+    }
+
+    function _validateInitialTokensPerSecond(
+        uint256 _tokensPerSecond
+    ) internal pure {
+        require(_tokensPerSecond > 0, "Invalid initial token flow");
+    }
+
     function _setStrategyAndMultipliers(
         address _rewardToken,
         IPaymentCoordinator.StrategyAndMultiplier[]
@@ -293,9 +295,13 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
         delete strategyAndMultipliers[_rewardToken];
 
         // Push each element from the memory array to the storage array
-        for (uint256 i = 0; i < _strategyAndMultipliers.length; i++) {
+        for (
+            uint256 index = 0;
+            index < _strategyAndMultipliers.length;
+            index++
+        ) {
             strategyAndMultipliers[_rewardToken].push(
-                _strategyAndMultipliers[i]
+                _strategyAndMultipliers[index]
             );
         }
     }
@@ -310,21 +316,22 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
                 rewardTokens.length
             );
 
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+        for (uint256 index = 0; index < rewardTokens.length; index++) {
             (
                 uint256 claimableTokens,
                 uint256 claimableFees
-            ) = rewardTokenAccumulator[rewardTokens[i]].claim(
+            ) = rewardTokenAccumulator[rewardTokens[index]].claim(
                     performanceFeeBPS,
                     lastPaymentTimestamp
                 );
-            IERC20 rewardToken = IERC20(rewardTokens[i]);
+            IERC20 rewardToken = IERC20(rewardTokens[index]);
 
-            _transferPerformanceFeeToAnzen(rewardTokens[i], claimableFees);
+            _transferPerformanceFeeToAnzen(rewardToken, claimableFees);
 
-            rangePayments[i] = _createRangePayment(
+            rangePayments[index] = _createRangePayment(
                 rewardToken,
-                claimableTokens
+                claimableTokens,
+                claimableFees
             );
         }
 
@@ -333,19 +340,20 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
 
     function _createRangePayment(
         IERC20 _rewardToken,
-        uint256 _claimableTokens
+        uint256 _claimableAmount,
+        uint256 _fee
     ) internal view returns (IPaymentCoordinator.RangePayment memory) {
         // Get the claimable tokens for the reward token
-        uint256 maxClaimableTokens = Math.max(
-            _claimableTokens,
-            _rewardToken.balanceOf(address(this))
+        require(
+            _claimableAmount + _fee <= _rewardToken.balanceOf(address(this)),
+            "Insufficient balance"
         );
 
         return
             IPaymentCoordinator.RangePayment({
                 token: _rewardToken,
-                amount: maxClaimableTokens,
-                duration: lastPaymentTimestamp - uint32(block.timestamp),
+                amount: _claimableAmount,
+                duration: uint32(block.timestamp) - lastPaymentTimestamp,
                 strategiesAndMultipliers: strategyAndMultipliers[
                     address(_rewardToken)
                 ],
@@ -354,11 +362,10 @@ contract AVSReservesManager is IAVSReservesManager, AccessControl {
     }
 
     function _transferPerformanceFeeToAnzen(
-        address _rewardToken,
+        IERC20 _rewardToken,
         uint256 _fee
     ) internal {
         // Transfer the fee to the Anzen contract
-        IERC20 rewardToken = IERC20(_rewardToken);
-        rewardToken.safeTransfer(anzen, _fee);
+        _rewardToken.safeTransfer(anzen, _fee);
     }
 }

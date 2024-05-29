@@ -6,19 +6,25 @@ import "forge-std/console.sol";
 
 import "../../static/Structs.sol";
 import "../../AVSReservesManager.sol";
+import "../harnesses/AVSReservesManagerHarness.sol";
+
 import "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
 // Mocks
 import "../mocks/MockSafetyFactorOracle.sol";
+import "../mocks/MockERC20.sol";
 
 contract AVSReservesManagerTests is Test {
-    AVSReservesManager public reservesManager;
+    AVSReservesManagerHarness public reservesManager;
     MockSafetyFactorOracle public safetyFactorOracle;
     SafetyFactorConfig public safetyFactorConfig;
 
     address public anzenGov;
     address public avsGov;
     address public avsId;
+    address public avsServiceManager;
+    uint256 public performanceBPS;
 
+    MockToken[] public rewardTokens;
     address[] public avsRewardTokens;
     uint256[] public initialTokenFlows;
 
@@ -28,18 +34,26 @@ contract AVSReservesManagerTests is Test {
         anzenGov = address(0x555);
         avsGov = address(0x456);
         avsId = address(0x789);
+        avsServiceManager = address(0x333);
 
         // a healthy safety factor in between the bounds
         int256 safetyFactorInit = (int256(PRECISION) * 130) / 100;
         safetyFactorOracle.mockSetSafetyFactor(avsId, safetyFactorInit);
 
+        MockToken rewardToken1 = new MockToken("Token1", "TK1");
+        MockToken rewardToken2 = new MockToken("Token2", "TK2");
+
+        rewardTokens = [rewardToken1, rewardToken2];
+
         avsRewardTokens = new address[](2);
-        avsRewardTokens[0] = address(0xabc);
-        avsRewardTokens[1] = address(0xdef);
+        avsRewardTokens[0] = address(rewardToken1);
+        avsRewardTokens[1] = address(rewardToken2);
 
         initialTokenFlows = new uint256[](2);
         initialTokenFlows[0] = 100;
         initialTokenFlows[1] = 200;
+
+        performanceBPS = 300;
 
         safetyFactorConfig = SafetyFactorConfig(
             (int256(PRECISION) * 120) / 100, // 120% of the current value
@@ -50,11 +64,13 @@ contract AVSReservesManagerTests is Test {
         );
 
         vm.prank(anzenGov);
-        reservesManager = new AVSReservesManager(
+        reservesManager = new AVSReservesManagerHarness(
             safetyFactorConfig,
+            performanceBPS,
             address(safetyFactorOracle),
             avsGov,
             avsId,
+            avsServiceManager,
             avsRewardTokens,
             initialTokenFlows
         );
@@ -205,6 +221,9 @@ contract AVSReservesManagerTests is Test {
         address newToken,
         uint256 newTokenFlow
     ) public {
+        vm.assume(newToken != address(rewardTokens[0]));
+        vm.assume(newToken != address(rewardTokens[1]));
+        vm.assume(newTokenFlow > 0);
         vm.prank(avsGov);
         IPaymentCoordinator.StrategyAndMultiplier[]
             memory strategyAndMultiplier = new IPaymentCoordinator.StrategyAndMultiplier[](
@@ -318,5 +337,77 @@ contract AVSReservesManagerTests is Test {
                 strategyAndMultiplier[i].multiplier
             );
         }
+    }
+
+    function test_overrideClaimableTokens(uint256 newClaimableTokens) public {
+        address token = avsRewardTokens[0];
+        vm.prank(avsGov);
+        reservesManager.overrideClaimableTokens(token, newClaimableTokens);
+
+        (
+            uint256 claimableTokens,
+            uint256 claimableFees,
+            uint256 tokensPerSecond,
+            uint256 prevTokensPerSecond,
+            int256 lastSafetyFactor
+        ) = reservesManager.rewardTokenAccumulator(token);
+
+        assertEq(claimableTokens, newClaimableTokens);
+        assertEq(claimableFees, 0);
+        assertEq(tokensPerSecond, initialTokenFlows[0]);
+        assertEq(prevTokensPerSecond, initialTokenFlows[0]);
+        assertEq(lastSafetyFactor, (int256(PRECISION) * 130) / 100);
+    }
+
+    function test_createRangePaymentSufficientFundsInReserves(
+        uint256 duration,
+        uint256 totalAmount,
+        uint256 amountInReserves
+    ) public {
+        uint256 claimableFees = totalAmount / 100;
+        uint256 claimableAmount = totalAmount - claimableFees;
+        vm.assume(duration > 1);
+        vm.assume(duration < 180 days);
+        vm.assume(claimableAmount > 0);
+        vm.assume(claimableAmount + claimableFees < UINT256_MAX);
+        vm.assume(claimableAmount + claimableFees <= amountInReserves);
+
+        vm.warp(duration);
+        rewardTokens[0].mint(address(reservesManager), amountInReserves);
+
+        IPaymentCoordinator.RangePayment memory rangePayment = reservesManager
+            .createRangePayment(
+                rewardTokens[0],
+                claimableAmount,
+                claimableFees
+            );
+
+        assertEq(address(rangePayment.token), address(rewardTokens[0]));
+        assertEq(rangePayment.amount, claimableAmount);
+        assertEq(rangePayment.duration, duration - 1);
+        assertEq(rangePayment.startTimestamp, 1);
+    }
+
+    function test_createRangePaymentInsufficientFundsInReserves(
+        uint256 duration,
+        uint256 totalAmount,
+        uint256 amountInReserves
+    ) public {
+        uint256 claimableFees = totalAmount / 100;
+        uint256 claimableAmount = totalAmount - claimableFees;
+
+        vm.assume(duration > 1);
+        vm.assume(duration < 180 days);
+        vm.assume(claimableAmount + claimableFees > amountInReserves);
+
+        vm.warp(duration);
+        rewardTokens[0].mint(address(reservesManager), amountInReserves);
+
+        vm.expectRevert("Insufficient balance");
+        reservesManager.createRangePayment(
+            rewardTokens[0],
+            claimableAmount,
+            claimableFees
+        );
     }
 }

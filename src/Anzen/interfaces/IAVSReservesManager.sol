@@ -20,7 +20,5 @@ interface IAVSReservesManager {
         SafetyFactorConfig memory newSafetyFactorConfig
     ) external;
 
-    function setServiceManager(address paymentMaster) external;
-
     // Use this function to get the amount of tokens that can be claimed by the AVS
 }

@@ -14,17 +14,6 @@ library AccumulatorLib {
         accumulator.lastSafetyFactor = initSafetyFactor;
     }
 
-    function overrideTokensPerSecond(
-        Accumulator storage accumulator,
-        uint256 tokensPerSecond,
-        uint256 lastEpochUpdateTimestamp
-    ) external {
-        _adjustClaimableTokens(accumulator, 0, lastEpochUpdateTimestamp);
-
-        accumulator.tokensPerSecond = tokensPerSecond;
-        accumulator.prevTokensPerSecond = tokensPerSecond;
-    }
-
     function adjustEpochFlow(
         Accumulator storage accumulator,
         SafetyFactorConfig memory config,
@@ -81,6 +70,24 @@ library AccumulatorLib {
         accumulator.claimableFees = 0;
 
         return (claimableTokens, claimableFees);
+    }
+
+    function overrideTokensPerSecond(
+        Accumulator storage accumulator,
+        uint256 tokensPerSecond,
+        uint256 lastEpochUpdateTimestamp
+    ) external {
+        _adjustClaimableTokens(accumulator, 0, lastEpochUpdateTimestamp);
+
+        accumulator.tokensPerSecond = tokensPerSecond;
+        accumulator.prevTokensPerSecond = tokensPerSecond;
+    }
+
+    function overrideClaimableTokens(
+        Accumulator storage accumulator,
+        uint256 claimableTokens
+    ) external {
+        accumulator.claimableTokens = claimableTokens;
     }
 
     function _calculateClaimableTokensAndFee(
