@@ -34,6 +34,8 @@ library AccumulatorLib {
         uint256 prevTokensPerSecond = accumulator.tokensPerSecond;
 
         uint256 newTokensPerSecond;
+        // Todo: make this linearly interpolate with these max and min bounds
+        // This will be basically "newton's method" to converge to the target safety factor
 
         if (currentSafetyFactor > config.TARGET_SF_UPPER_BOUND) {
             newTokensPerSecond =

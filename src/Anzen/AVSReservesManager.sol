@@ -179,6 +179,21 @@ contract AVSReservesManager is AVSReservesManagerStorage, AccessControl {
         lastEpochUpdateTimestamp = block.timestamp;
     }
 
+    function overrideTokensPerSecondForToken(
+        address _rewardToken,
+        uint256 _newTokensPerSecond
+    ) external onlyAvsGov {
+        require(
+            rewardTokenAccumulator[_rewardToken].tokensPerSecond != 0,
+            "Reward token does not exist"
+        );
+        rewardTokenAccumulator[_rewardToken].overrideTokensPerSecond(
+            _newTokensPerSecond,
+            lastEpochUpdateTimestamp
+        );
+        lastEpochUpdateTimestamp = block.timestamp;
+    }
+
     function overrideClaimableTokens(
         address _rewardToken,
         uint256 _claimableTokens
